@@ -1,9 +1,7 @@
-go-xmpp
+tool_openfire_test
 =======
 
-go xmpp library
-
-currently used for Openfire load test. 
+This tool is currently used for Openfire load testing. It's developed using the go-xmpp library. 
 
 Test environment configuration:
 ```
