@@ -65,9 +65,11 @@ func main() {
 	sent := 0
 	received := 0
 	go func() {
+		counter := 0
 		for {
-			fmt.Printf("Sent: %d, Received: %d, Rate: %f\n", sent, received, float64(received)/float64(sent))
+			fmt.Printf("Time: %ds, Sent: %d, Received: %d, Rate: %f\n", counter, sent, received, float64(received)/float64(sent))
 			time.Sleep(time.Second)
+			counter += 1
 		}
 	}()
 
