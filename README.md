@@ -18,7 +18,7 @@ For help
 $ ./go-xmpp -h
 ```
 
-Example: Of all the 60 users, each user on average sends 1 message per 100 milliseconds, and sends 50 messages in total
+Example: Of all the 60 users, each user on average sends 1 message per 100 milliseconds, and sends 1000 messages in total, and output the chart to /tmp/100ms.png
 ```bash
-$ ./go-xmpp -f 100 -t 50
+$ ./go-xmpp -f 100 -t 1000 -o /tmp/100ms.png
 ```
