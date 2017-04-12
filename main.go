@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"./xmpp"
 	"github.com/wcharczuk/go-chart"
+	"github.com/chrislusf/glow/flow"
 	"bytes"
 	"io/ioutil"
+	"regexp"
+	"strconv"
 )
 
 const tagSent string = "sent"
@@ -44,7 +47,7 @@ func main() {
 				StatusMessage: "Allen is testing",
 			}
 
-			randomSleep(5)
+			randomSleep(10) // login all users within 10 seconds
 			xmppClient, err := options.NewClient()
 
 			if err != nil {
@@ -66,8 +69,10 @@ func main() {
 	}
 
 	resultChan := make(chan string, 100000000)
+	latencyChan := make(chan int64, 100000000)
+
 	for _,xmppClient := range xmppClients  {
-		go chatbot(xmppClient, resultChan)
+		go chatbot(xmppClient, resultChan, latencyChan)
 	}
 
 	// new thread to print out result per second
@@ -83,19 +88,19 @@ func main() {
 
 		for {
 			select {
-				case <-exitChan:
-					return;
-				default:
-					rate := 0.0
-					if sent != 0{
-						rate = float64(received)/float64(sent)
-					}
-					xValues = append(xValues, float64(counter))
-					ySentValues = append(ySentValues, float64(sent))
-					yReceivedValues = append(yReceivedValues, float64(received))
-					fmt.Printf("Time: %dms, Sent: %d, Received: %d, Rate: %f\n", counter, sent, received, rate)
-					time.Sleep(time.Duration(*sampleRate) * time.Millisecond)
-					counter += *sampleRate
+			case <-exitChan:
+				return;
+			default:
+				rate := 0.0
+				if sent != 0{
+					rate = float64(received)/float64(sent)
+				}
+				xValues = append(xValues, float64(counter))
+				ySentValues = append(ySentValues, float64(sent))
+				yReceivedValues = append(yReceivedValues, float64(received))
+				fmt.Printf("Time: %dms, Sent: %d, Received: %d, Rate: %f\n", counter, sent, received, rate)
+				time.Sleep(time.Duration(*sampleRate) * time.Millisecond)
+				counter += *sampleRate
 			}
 		}
 	}()
@@ -109,14 +114,25 @@ func main() {
 			if received == totalMsg {
 				time.Sleep(5 * time.Second) // sleep a while to let the output continue
 				exitChan <- "exit"
-				break
+				close(exitChan)
+				close(resultChan)
+				close(latencyChan)
 			}
 		}
 	}
+
 	if *imgFile == "" {
 		return
 	}
-	graph := chart.Chart{
+
+	// output file name
+	reg := regexp.MustCompile(`\.png$`)
+	imgPrefix := reg.ReplaceAllString(*imgFile, "")
+	lineChartFile := imgPrefix + ".line.png";
+	pieChartFile := imgPrefix + ".pie.png";
+
+	// line chart
+	line := chart.Chart{
 		XAxis: chart.XAxis{
 			Name:      "time(milliseconds)",
 			NameStyle: chart.StyleShow(),
@@ -142,10 +158,56 @@ func main() {
 	}
 
 	buffer := bytes.NewBuffer([]byte{})
-	fmt.Println("generating chart ...")
-	graph.Render(chart.PNG, buffer)
-	ioutil.WriteFile(*imgFile, buffer.Bytes(), 0644)
-	fmt.Println("chart is saved to " + *imgFile)
+	fmt.Println("generating line chart ...")
+	line.Render(chart.PNG, buffer)
+	ioutil.WriteFile(lineChartFile, buffer.Bytes(), 0644)
+	fmt.Println("Line chart is saved to " + lineChartFile)
+
+	// parse latency datadata
+	var latencyDataSrc map[string]int
+	flow.New().Channel(
+		latencyChan,
+	).Map(func(l int64) map[string]int {
+		key := strconv.FormatInt(l/1000 + 1, 10) + "s" // ceil in seconds
+		return map[string]int{key : 1}
+	}).Reduce(func(x map[string]int, y map[string]int) map[string]int { // merge two maps
+		z := map[string]int{}
+		for k,v := range x {
+			z[k] = v
+		}
+		for k,v := range y {
+			if _, ok := z[k]; ok {
+				z[k] += v
+			}else{
+				z[k] = v
+			}
+		}
+		return z
+	}).Map(func(x map[string]int) {
+		latencyDataSrc = x
+	}).Run()
+
+	// pie chart
+	// convert latencyDataSrc to []chart.Value
+	pieDataSrc := []chart.Value{}
+	for k,v := range latencyDataSrc {
+		pieDataSrc = append(pieDataSrc, chart.Value{
+			Label: k,
+			Value: float64(v),
+		})
+	}
+
+	pie := chart.PieChart{
+		Width:  512,
+		Height: 512,
+		Values: pieDataSrc,
+	}
+
+	buffer = bytes.NewBuffer([]byte{})
+	fmt.Println("generating pie chart ...")
+	pie.Render(chart.PNG, buffer)
+	ioutil.WriteFile(pieChartFile, buffer.Bytes(), 0644)
+	fmt.Println("Pie chart is saved to " + pieChartFile)
 }
 
 func check(e error) {
@@ -158,7 +220,10 @@ func randomSleep(maxSecond float64) {
 	x :=time.Duration(maxSecond * float64(rand.Intn(1000))) * time.Millisecond
 	time.Sleep(x)
 }
-func chatbot(talk *xmpp.Client, resultChan chan<- string) {
+func nowInUnixMilli() int64 {
+	return time.Now().UnixNano() / (int64(time.Millisecond)/int64(time.Nanosecond))
+}
+func chatbot(talk *xmpp.Client, resultChan chan<- string, latencyChan chan<- int64) {
 	// receive message
 	go func() {
 		for {
@@ -166,9 +231,13 @@ func chatbot(talk *xmpp.Client, resultChan chan<- string) {
 			if err != nil {
 				log.Fatal(err)
 			}
-			switch chat.(type) {
-			case xmpp.Chat:
-				resultChan <- tagReceived
+			switch v := chat.(type) {
+				case xmpp.Chat:
+					resultChan <- tagReceived
+					// calculate the latency
+					sentTime, _ := strconv.ParseInt(v.Text, 10, 64)
+					latencyMs := nowInUnixMilli() - sentTime
+					latencyChan <- latencyMs
 			}
 		}
 	}()
@@ -178,7 +247,7 @@ func chatbot(talk *xmpp.Client, resultChan chan<- string) {
 	maxInterval := float64(*msPerMsgPerUser) * 2.0 / 1000.0
 	for i:=0; i<*totalMsgPerUser; i++ {
 		randomUser := fmt.Sprintf("u_%d@jabber.hylaa.net", rand.Intn(numberOfUsers)+1)
-		talk.Send(xmpp.Chat{Remote: randomUser, Type: "chat", Text: "hello"})
+		talk.Send(xmpp.Chat{Remote: randomUser, Type: "chat", Text: strconv.FormatInt(nowInUnixMilli(), 10)})
 		resultChan <- tagSent
 		randomSleep(maxInterval)
 	}
